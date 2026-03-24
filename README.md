@@ -2,6 +2,8 @@
 
 **Objective:** To build a fully offline, air-gapped Retrieval-Augmented Generation (RAG) system for legal reasoning, document synthesis, and drafting, leveraging local Large Language Models (LLMs) on an M3 MacBook Air (24GB RAM) with a 6TB external SSD. 
 
+The latest text extraction script, named squeegee.py, processed the contents of the AI_Staging_Ground/Documents folder, which was comprised of dense .pdf and .docx legal and personal files. Crucially, the script utilizes full-document OCR (Optical Character Recognition) and deep text extraction to pull 100% of the raw text from every single page, generating lightweight, unabridged sibling .txt files directly alongside the originals. This structured output allows a local RAG system to efficiently ingest the complete text to construct a searchable vector database, enabling the LLM to output accurate legal reasoning while preserving the original PDFs for physical review and citation.
+
 ---
 
 ## 1. Current Progress: Infrastructure Setup
