@@ -1,10 +1,31 @@
 from __future__ import annotations
 
 import argparse
+import os
+from datetime import datetime
 from pathlib import Path
 
 
 DEFAULT_TARGET_DIR = Path.home() / "Desktop" / "Desktop_Triage" / "AI_Staging_Ground" / "Documents"
+
+
+def build_pdf_metadata_header(pdf_path: Path) -> str:
+    import fitz  # PyMuPDF
+
+    file_stat = os.stat(pdf_path)
+    mac_date = datetime.fromtimestamp(file_stat.st_birthtime).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+    with fitz.open(pdf_path) as doc:
+        internal_meta = doc.metadata.get("creationDate", "Unknown Internal Date")
+
+    header = "--- DOCUMENT METADATA ---\n"
+    header += f"Original File: {pdf_path.name}\n"
+    header += f"Internal PDF Date: {internal_meta}\n"
+    header += f"Mac File Saved Date: {mac_date}\n"
+    header += "--- END METADATA ---\n\n"
+    return header
 
 
 def extract_pdf_text(pdf_path: Path) -> str:
@@ -38,7 +59,7 @@ def extract_docx_text(docx_path: Path) -> str:
 def convert_to_txt(source_path: Path) -> Path:
     suffix = source_path.suffix.lower()
     if suffix == ".pdf":
-        text = extract_pdf_text(source_path)
+        text = build_pdf_metadata_header(source_path) + extract_pdf_text(source_path)
     elif suffix == ".docx":
         text = extract_docx_text(source_path)
     else:
