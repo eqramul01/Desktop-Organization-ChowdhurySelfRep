@@ -4,10 +4,18 @@ import re
 import csv
 import time
 import shutil
+import tempfile
 import subprocess
 from datetime import datetime
 from google import genai
 from dotenv import load_dotenv
+
+# Professional Imaging Libraries
+from PIL import Image
+from pillow_heif import register_heif_opener
+
+# Enable Apple HEIC support
+register_heif_opener()
 
 # --- 1. AUTHENTICATION ---
 load_dotenv()
@@ -18,12 +26,11 @@ if not api_key:
     exit()
 
 client = genai.Client(api_key=api_key)
+SUPPORTED_EXTS = ['.pdf', '.jpg', '.jpeg', '.png', '.tiff', '.tif', '.heic']
 
-# --- 2. DIRECTORY ROUTING (GUI POPUPS) ---
+# --- 2. GUI ROUTING ---
 def get_directories():
-    """Summons native macOS Finder windows to select Source and Target folders."""
     print("[SYSTEM] Summoning native macOS folder selection...")
-    
     def ask_mac_folder(prompt_text):
         script = f'set folderPath to choose folder with prompt "{prompt_text}"\nPOSIX path of folderPath'
         try:
@@ -32,125 +39,179 @@ def get_directories():
         except subprocess.CalledProcessError:
             return None
 
-    source_dir = ask_mac_folder("Select SOURCE Folder (PDFs to process)")
+    source_dir = ask_mac_folder("Select SOURCE Folder (The badly named files)")
     if not source_dir:
         print("No source folder selected. Exiting.")
         exit()
         
-    target_dir = ask_mac_folder("Select TARGET Folder (Where the clean files & folders go)")
+    target_dir = ask_mac_folder("Select TARGET Folder (Where the clean files go)")
     if not target_dir:
         print("No target folder selected. Exiting.")
         exit()
         
     return source_dir, target_dir
 
-# --- 3. CSV LEDGER ---
+# --- 3. SANITIZATION & GHOST UPLOAD ---
+def sanitize_text(text):
+    """Replaces slashes and illegal characters to prevent folder creation crashes."""
+    if not text or text == "N/A":
+        return "Unknown"
+    # Replace slashes, colons, backslashes with dashes
+    clean = re.sub(r'[\\/*?:"<>|]', '-', str(text))
+    return clean.strip()
+
+def prepare_safe_upload(file_path):
+    """
+    Creates a strictly ASCII-named temporary copy for the Google SDK.
+    This permanently fixes crashes caused by dashes, smart quotes, or emojis in filenames.
+    Converts TIFF/HEIC to PDF for Gemini.
+    """
+    ext = os.path.splitext(file_path)[1].lower()
+    temp_dir = tempfile.gettempdir()
+    # Create a safe, random ASCII filename
+    safe_filename = f"safe_upload_{int(time.time() * 1000)}"
+    
+    if ext in ['.tiff', '.tif', '.heic']:
+        print(f"   -> [SYSTEM] Converting {ext.upper()} to temporary PDF...")
+        temp_path = os.path.join(temp_dir, safe_filename + ".pdf")
+        try:
+            image = Image.open(file_path)
+            images = []
+            if getattr(image, "is_animated", False) or hasattr(image, "n_frames"):
+                for i in range(image.n_frames):
+                    image.seek(i)
+                    images.append(image.convert("RGB"))
+            else:
+                images.append(image.convert("RGB"))
+                
+            images[0].save(temp_path, save_all=True, append_images=images[1:])
+            return temp_path
+        except Exception as e:
+            print(f"   -> [ERROR] Image conversion failed: {e}")
+            return None
+    else:
+        # For PDF, JPG, PNG: Just make a safe-named copy
+        temp_path = os.path.join(temp_dir, safe_filename + ext)
+        shutil.copy2(file_path, temp_path)
+        return temp_path
+
+# --- 4. GEMINI 2.5 FLASH DUAL-ENGINE ---
+def analyze_and_extract(file_path):
+    """Uploads once, asks Gemini for JSON Metadata AND Full OCR Text."""
+    upload_path = prepare_safe_upload(file_path)
+    if not upload_path:
+        return None, None
+        
+    uploaded_file = None
+    try:
+        uploaded_file = client.files.upload(file=upload_path)
+        
+        # 1. Extract Metadata
+        prompt_meta = """
+        You are an expert Florida paralegal. Read this entire document natively.
+        Extract:
+        1. Execution Date (YYYY-MM-DD). If none, use "Unknown_Date". Do NOT output slashes.
+        2. Document Type (3-4 words, use underscores).
+        Return ONLY valid JSON: {"date": "YYYY-MM-DD", "doc_type": "Doc_Type"}
+        """
+        res_meta = client.models.generate_content(model='gemini-2.5-flash', contents=[uploaded_file, prompt_meta])
+        
+        # 2. Extract Full OCR Text for RAG
+        prompt_text = "Extract 100% of the raw text from this document accurately. Preserve formatting. Do not summarize."
+        res_text = client.models.generate_content(model='gemini-2.5-flash', contents=[uploaded_file, prompt_text])
+        
+        ai_data = None
+        match = re.search(r'\{.*?\}', res_meta.text, re.DOTALL)
+        if match:
+            ai_data = json.loads(match.group(0))
+            
+        return ai_data, res_text.text
+            
+    except Exception as e:
+        print(f"   -> [ERROR] Gemini API failed: {e}")
+        return None, None
+        
+    finally:
+        if uploaded_file:
+            try:
+                client.files.delete(name=uploaded_file.name)
+            except:
+                pass
+        if upload_path and os.path.exists(upload_path):
+            os.remove(upload_path)
+
+# --- 5. CSV LEDGER ---
 def initialize_catalog(target_dir):
     catalog_file = os.path.join(target_dir, "document_catalog_gemini.csv")
     if not os.path.exists(catalog_file):
         with open(catalog_file, mode='w', newline='') as file:
             writer = csv.writer(file)
-            writer.writerow(["Process_Timestamp", "Original_Filename", "New_Filename", "Execution_Date", "Document_Type", "Storage_Path"])
+            writer.writerow(["Process_Timestamp", "Original_Filename", "New_Filename", "Execution_Date", "Document_Type"])
     return catalog_file
 
-def log_to_catalog(catalog_file, old_name, new_name, exec_date, doc_type, save_path):
+def log_to_catalog(catalog_file, old_name, new_name, exec_date, doc_type):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with open(catalog_file, mode='a', newline='') as file:
         writer = csv.writer(file)
-        writer.writerow([timestamp, old_name, new_name, exec_date, doc_type, save_path])
+        writer.writerow([timestamp, old_name, new_name, exec_date, doc_type])
 
-# --- 4. GEMINI 2.5 FLASH ENGINE (JSON + OCR TEXT) ---
-def analyze_pdf_with_gemini(pdf_path):
-    """Uploads PDF, extracts JSON metadata AND full OCR text, handles 503 errors."""
-    uploaded_file = None
-    max_retries = 3
-    retry_delay = 7  
-    
-    prompt = """
-    You are an expert Florida real estate paralegal. Read this entire legal document natively.
-    
-    Provide the output in exactly two parts:
-    PART 1: A JSON block containing the Date and Document Type.
-    PART 2: The complete, raw OCR text transcript of the entire document.
-
-    Extract two pieces of information for the JSON:
-    1. The actual Execution Date or Notarization Date when the document was signed. WARNING: Do NOT extract the Notary Commission Expiration Date. Convert the actual execution date strictly to the format: YYYY-MM-DD.
-    2. A short, 3-to-4 word description of the Document Type (e.g., Warranty_Deed, Balloon_Mortgage, Quit_Claim_Deed). Use underscores instead of spaces.
-    
-    Format your response EXACTLY like this:
-    ```json
-    {"date": "YYYY-MM-DD", "doc_type": "Document_Type_Here"}
-    ```
-    ---TEXT---
-    [Insert the entire raw text of the document here]
-    """
-
-    try:
-        uploaded_file = client.files.upload(file=pdf_path)
-        
-        for attempt in range(max_retries):
-            try:
-                response = client.models.generate_content(
-                    model='gemini-2.5-flash',
-                    contents=[uploaded_file, prompt]
-                )
-                
-                raw_output = response.text
-                
-                # Extract JSON
-                match_json = re.search(r'\{.*?\}', raw_output, re.DOTALL)
-                
-                # Extract Full Text
-                parts = raw_output.split("---TEXT---")
-                full_text = parts[1].strip() if len(parts) > 1 else "No text extracted."
-                
-                if match_json:
-                    clean_json = match_json.group(0)
-                    ai_data = json.loads(clean_json)
-                    ai_data["full_text"] = full_text 
-                    return ai_data
-                else:
-                    print(f"   -> Regex failed to find JSON in response.")
-                    return None 
-                    
-            except Exception as e:
-                error_str = str(e)
-                if "503" in error_str or "UNAVAILABLE" in error_str:
-                    if attempt < max_retries - 1:
-                        print(f"   -> API busy (503). Waiting {retry_delay} seconds to retry... (Attempt {attempt + 1} of {max_retries})")
-                        time.sleep(retry_delay)
-                    else:
-                        print(f"   -> FAILED: Gemini could not parse after {max_retries} attempts.")
-                        return None
-                else:
-                    print(f"   -> Gemini API failed unexpectedly: {error_str}")
-                    return None
-                    
-    except Exception as upload_error:
-         print(f"   -> Failed to upload file to Gemini: {upload_error}")
-         return None
-         
-    finally:
-        if uploaded_file:
-            try:
-                client.files.delete(name=uploaded_file.name)
-            except Exception as e:
-                print(f"   -> Failed to delete cloud file: {e}")
-
-# --- 5. MAIN WORKFLOW ---
+# --- 6. MAIN WORKFLOW ---
 def process_directory():
     source_dir, target_dir = get_directories()
-    if not source_dir or not target_dir:
-        return
-        
     catalog_file = initialize_catalog(target_dir)
     
     print(f"\nMoving files from: {source_dir}")
     print(f"Saving cleaned files to: {target_dir}\n")
     
-    for filename in os.listdir(source_dir):
-        if not filename.lower().endswith(".pdf"):
-            continue
-
+    files_to_process = [f for f in os.listdir(source_dir) if os.path.splitext(f)[1].lower() in SUPPORTED_EXTS]
+    
+    for filename in files_to_process:
+        ext = os.path.splitext(filename)[1].lower()
         old_path = os.path.join(source_dir, filename)
-        print(f"Processing: {filename}")
+        
+        print(f"\nProcessing: {filename}")
+        ai_data, extracted_text = analyze_and_extract(old_path)
+        
+        if ai_data and "date" in ai_data and "doc_type" in ai_data:
+            # Sanitize to prevent "N/A" slash crashes
+            chrono_date = sanitize_text(ai_data["date"])
+            doc_type = sanitize_text(ai_data["doc_type"])
+            
+            # Determine Year Folder
+            year_match = re.match(r'^(\d{4})', chrono_date)
+            year_folder = year_match.group(1) if year_match else "Unknown_Year"
+            
+            # Create Year Directory if it doesn't exist
+            year_dir_path = os.path.join(target_dir, year_folder)
+            os.makedirs(year_dir_path, exist_ok=True)
+            
+            # Determine final file paths
+            new_filename = f"{chrono_date}_{doc_type}{ext}"
+            new_path = os.path.join(year_dir_path, new_filename)
+            
+            # Handle duplicates gracefully
+            if os.path.exists(new_path):
+                new_filename = f"{chrono_date}_{doc_type}_2{ext}"
+                new_path = os.path.join(year_dir_path, new_filename)
+                
+            txt_path = os.path.join(year_dir_path, f"{os.path.splitext(new_filename)[0]}.txt")
+            
+            # 1. Move Original File
+            shutil.move(old_path, new_path)
+            
+            # 2. Write Text File for RAG
+            if extracted_text:
+                with open(txt_path, 'w', encoding='utf-8') as f:
+                    f.write(extracted_text)
+            
+            log_to_catalog(catalog_file, filename, new_filename, chrono_date, doc_type)
+            print(f"SUCCESS: Saved to /{year_folder}/ {new_filename} (+ .txt)")
+            
+        else:
+            print(f"FAILED: Could not parse {filename}.")
+            
+        time.sleep(5) # Protects Google API Rate Limits
+
+if __name__ == "__main__":
+    process_directory()
+    print("\nBatch complete. CSV Catalog updated.")

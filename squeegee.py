@@ -1,134 +1,102 @@
-from __future__ import annotations
-
-import argparse
 import os
-from datetime import datetime
-from pathlib import Path
+import time
+import subprocess
+from google import genai
+from dotenv import load_dotenv
 
+# --- 1. AUTHENTICATION ---
+load_dotenv()
+api_key = os.getenv("GEMINI_API_KEY")
 
-DEFAULT_TARGET_DIR = Path.home() / "Desktop" / "Desktop_Triage" / "AI_Staging_Ground" / "Documents"
+if not api_key:
+    print("CRITICAL ERROR: Could not find GEMINI_API_KEY. Check your .env file.")
+    exit()
 
+# Using the new SDK client
+client = genai.Client(api_key=api_key)
 
-def build_pdf_metadata_header(pdf_path: Path) -> str:
-    import fitz  # PyMuPDF
-
-    file_stat = os.stat(pdf_path)
-    mac_date = datetime.fromtimestamp(file_stat.st_birthtime).strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
-
-    with fitz.open(pdf_path) as doc:
-        internal_meta = doc.metadata.get("creationDate", "Unknown Internal Date")
-
-    header = "--- DOCUMENT METADATA ---\n"
-    header += f"Original File: {pdf_path.name}\n"
-    header += f"Internal PDF Date: {internal_meta}\n"
-    header += f"Mac File Saved Date: {mac_date}\n"
-    header += "--- END METADATA ---\n\n"
-    return header
-
-
-def extract_pdf_text(pdf_path: Path) -> str:
+# --- 2. GUI ROUTING ---
+def get_directory():
+    """Summons native macOS Finder window using AppleScript."""
+    print("[SYSTEM] Summoning native macOS folder selection...")
+    script = 'set folderPath to choose folder with prompt "Select the folder with your CLEANED PDFs"\nPOSIX path of folderPath'
     try:
-        import fitz  # PyMuPDF
+        result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, check=True)
+        return result.stdout.strip()
+    except subprocess.CalledProcessError:
+        return None
 
-        with fitz.open(pdf_path) as doc:
-            return "\n".join(page.get_text("text") for page in doc)
-    except ImportError:
-        from pypdf import PdfReader
-
-        reader = PdfReader(str(pdf_path))
-        chunks: list[str] = []
-        for page in reader.pages:
-            chunks.append(page.extract_text() or "")
-        return "\n".join(chunks)
-
-
-def extract_docx_text(docx_path: Path) -> str:
+# --- 3. GEMINI 2.5 FLASH OCR ENGINE ---
+def extract_text_with_gemini(pdf_path):
+    """Uploads PDF, extracts all raw text natively, and securely deletes the file."""
+    uploaded_file = None
     try:
-        import docx2txt
+        print(f"   -> Uploading {os.path.basename(pdf_path)} to secure cloud...")
+        uploaded_file = client.files.upload(file=pdf_path)
+        
+        prompt = """
+        You are an expert legal data extraction system. Read this entire document.
+        Extract 100% of the text accurately. 
+        Preserve formatting, paragraphs, lists, and tables as best as possible.
+        Do not summarize, do not add commentary, and do not use markdown code blocks.
+        Output ONLY the raw text found in the document.
+        """
+        
+        print("   -> Running full-document OCR via Gemini 2.5 Flash...")
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[uploaded_file, prompt]
+        )
+        
+        return response.text
+            
+    except Exception as e:
+        print(f"   -> [ERROR] Gemini API failed: {e}")
+        return None
+        
+    finally:
+        # Strict Cloud Hygiene: Immediately delete the file from Google's servers
+        if uploaded_file:
+            try:
+                client.files.delete(name=uploaded_file.name)
+            except Exception as e:
+                print(f"   -> [WARNING] Failed to delete cloud file: {e}")
 
-        return docx2txt.process(str(docx_path)) or ""
-    except ImportError:
-        from docx import Document
+# --- 4. MAIN WORKFLOW ---
+def process_directory():
+    target_dir = get_directory()
+    if not target_dir:
+        print("No folder selected. Exiting.")
+        return
 
-        doc = Document(str(docx_path))
-        return "\n".join(paragraph.text for paragraph in doc.paragraphs)
+    print(f"\nTargeting folder: {target_dir}\n")
+    
+    # Grab all PDFs in the folder
+    pdf_files = [f for f in os.listdir(target_dir) if f.lower().endswith(".pdf")]
+    
+    for filename in pdf_files:
+        pdf_path = os.path.join(target_dir, filename)
+        base_name = os.path.splitext(filename)[0]
+        txt_path = os.path.join(target_dir, f"{base_name}.txt")
+        
+        # Prevents you from double-billing the API if a text file already exists
+        if os.path.exists(txt_path):
+            print(f"Skipping: {filename} (Text file already exists)")
+            continue
 
-
-def convert_to_txt(source_path: Path) -> Path:
-    suffix = source_path.suffix.lower()
-    if suffix == ".pdf":
-        text = build_pdf_metadata_header(source_path) + extract_pdf_text(source_path)
-    elif suffix == ".docx":
-        text = extract_docx_text(source_path)
-    else:
-        raise ValueError(f"Unsupported file type: {source_path}")
-
-    out_path = source_path.with_suffix(".txt")
-    out_path.write_text(text, encoding="utf-8", errors="ignore")
-    return out_path
-
-
-def run(target_dir: Path, no_overwrite: bool = False) -> int:
-    if not target_dir.exists() or not target_dir.is_dir():
-        raise FileNotFoundError(f"Target directory does not exist: {target_dir}")
-
-    candidates = [
-        path
-        for path in target_dir.rglob("*")
-        if path.is_file() and path.suffix.lower() in {".pdf", ".docx"}
-    ]
-
-    converted = 0
-    skipped = 0
-    failed = 0
-
-    for source in candidates:
-        try:
-            out_path = source.with_suffix(".txt")
-            if no_overwrite and out_path.exists():
-                print(f"Skipped (exists): {out_path}")
-                skipped += 1
-                continue
-
-            out_path = convert_to_txt(source)
-            print(f"Converted: {source.name} -> {out_path.name}")
-            converted += 1
-        except Exception as exc:
-            print(f"Failed: {source} ({exc})")
-            failed += 1
-
-    print(
-        f"\nDone. Converted {converted} file(s); skipped {skipped} file(s); {failed} failure(s)."
-    )
-    return 0 if failed == 0 else 1
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Extract text from .pdf and .docx files into .txt files in-place."
-    )
-    parser.add_argument(
-        "--target",
-        type=Path,
-        default=DEFAULT_TARGET_DIR,
-        help=f"Folder to scan (default: {DEFAULT_TARGET_DIR})",
-    )
-    parser.add_argument(
-        "--no-overwrite",
-        action="store_true",
-        help="Skip files where same-name .txt already exists.",
-    )
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-    raise SystemExit(
-        run(args.target.expanduser().resolve(), no_overwrite=args.no_overwrite)
-    )
-
+        print(f"\nProcessing: {filename}")
+        extracted_text = extract_text_with_gemini(pdf_path)
+        
+        if extracted_text:
+            with open(txt_path, 'w', encoding='utf-8') as txt_file:
+                txt_file.write(extracted_text)
+            print(f"SUCCESS: Created sibling file -> {base_name}.txt")
+        else:
+            print(f"FAILED: Could not extract text for {filename}.")
+            
+        # A 3-second delay prevents API rate-limiting on the free tier
+        time.sleep(7)
 
 if __name__ == "__main__":
-    main()
+    process_directory()
+    print("\nSqueegee extraction complete. Files are ready for local RAG vectorization.")
