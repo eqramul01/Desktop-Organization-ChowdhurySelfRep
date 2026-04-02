@@ -1,0 +1,3 @@
+([('AI_Legal_Sorter',
+   '/Users/eqramulchowdhury/Desktop-Organization-ChowdhurySelfRep/dist/AI_Legal_Sorter',
+   'EXECUTABLE')],)
