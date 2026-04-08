@@ -1,41 +1,46 @@
-# Law Firm AI Data Pipeline: From Chaos to Air-Gapped RAG
+# ⚖️ Legal AI Swarm OS (Unified Pipeline)
 
-## ⚖️ Mission Statement & Use Case
-Law firms frequently download massive batches of disorganized public records, discovery files, and deeds from county portals (e.g., Miami-Dade, Broward). These files arrive with cryptic UUID filenames and fragmented metadata, making chronological case review and batch-printing a time-consuming manual task. 
+## Mission Statement
+Law firms and Pro Se litigants frequently download massive batches of disorganized public records, discovery files, and court dockets. These files arrive with cryptic UUID filenames and fragmented metadata, making chronological case review impossible. 
 
-This pipeline acts as an automated digital paralegal and data engineer. It is a hybrid architecture that uses a custom-built, multi-threaded macOS desktop app to triage and chronologically sort chaotic document dumps, and then utilizes local, air-gapped Large Language Models (LLMs) on Apple Silicon to perform deep Retrieval-Augmented Generation (RAG) for secure legal reasoning and drafting.
+The **Legal AI Swarm OS** is a hybrid multi-threaded application built for macOS Apple Silicon. It acts as an automated digital data engineer. It deploys a swarm of simultaneous bots to ingest chaotic document dumps, execute OCR, extract chronological metadata via cloud LLMs, and then perform offline semantic routing and cryptographic deduplication to build pristine, air-gapped Retrieval-Augmented Generation (RAG) databases.
 
 ---
 
-## 🚀 Phase 1: The AI Sorter Engine (Triage & Extraction)
-Before local AI can query documents, the raw desktop dumps must pass through a strict, automated triage system to ensure chronological formatting, data hygiene, and text extraction. This is handled by a standalone, multi-threaded macOS application built with CustomTkinter.
+## 🚀 Core Pipeline Capabilities
 
-* **Swarm Processing (Multithreading):** Utilizes `concurrent.futures` to deploy a pool of simultaneous AI worker bots. This deep-crawls nested directories and processes multiple files in parallel, drastically cutting ingestion time.
-* **Dual-Engine Extraction:** Utilizes the `google-genai` SDK (`gemini-2.5-flash`) to perform two tasks in a single breath:
-  1. **Metadata:** Distinguishes between execution dates and misleading stamps to generate chronological names (`YYYY-MM-DD_Document_Type.ext`).
-  2. **Full-Document OCR:** Extracts 100% of the raw text to generate lightweight, unabridged sibling `.txt` files for vectorization.
-* **Universal Format Support (Ghost Conversion):** Natively intercepts legacy/proprietary formats like multi-page TIFFs and Apple `.HEIC` photos, silently converting them to temporary PDFs in the background for flawless AI ingestion.
-* **Bulletproof ASCII Protection:** Bypasses network crashes caused by special characters (em-dashes, smart quotes) by creating sanitized, strictly ASCII-named "Ghost Copies" for the upload phase.
-* **Immutable Ledgering:** Every successful rename, classification, and original file path is logged to a thread-safe `document_catalog_gemini.csv` for a permanent forensic audit trail.
-* **Strict Cloud Hygiene:** The app enforces a `client.files.delete()` command the millisecond the data is extracted, ensuring legal documents are wiped from Google's servers immediately. API keys are securely stored in a hidden local Mac profile (`~/.legal_sorter_api_key.txt`), never in the codebase.
+The Swarm OS features a unified CustomTkinter GUI that routes operations through 4 distinct phases:
 
-## 🔒 Phase 2: The Air-Gapped RAG Architecture
-Once files are perfectly named and extracted into `.txt` format, the system shifts to absolute client privilege. Factual knowledge is strictly separated from behavioral training, processing all reasoning entirely offline.
+### Phase 1: AI OCR & Chronological Renaming (Cloud API)
+* **Dual-Engine Extraction:** Utilizes the `google-genai` SDK (`gemini-2.5-flash`) to perform two tasks simultaneously:
+  1. **Chronological Metadata:** Extracts Execution Dates and Document Types to rename files to a strict `YYYY-MM-DD_Document_Type.ext` format.
+  2. **Full-Document OCR:** Extracts 100% of the raw text and generates a sibling `.txt` file for lightweight vectorization.
+* **Format Agnostic:** Natively intercepts proprietary formats (Apple `.HEIC` photos, multi-page `.TIFFs`) and silently converts them to PDFs in the background for flawless AI ingestion.
+* **Strict Cloud Hygiene:** Enforces a `client.files.delete()` command the millisecond data is extracted, ensuring confidential legal documents are wiped from Google's servers instantly.
 
-* **Local Engine:** Utilizes Ollama to interface directly with the M3 MacBook Air's Metal GPU and 24GB of unified memory.
-* **Reasoning Model:** Runs Google's Gemma 3 (12B parameter) model, which features a massive 128K context window for heavy document synthesis.
-* **The Vector Database:** Open WebUI (`localhost:8080`) hosts the vector database, converting the extracted `.txt` files into searchable mathematical vectors using local embedding models (e.g., `nomic-embed-text`).
-* **Model Knowledge (The "What"):** Confidential case facts and timelines are never used to train the model's permanent weights. They are injected temporarily into the model's short-term memory via the local RAG Knowledge Bases.
+### Phase 2A: RAG Context Classifier (Cloud API)
+* **Semantic Routing:** Rather than relying on simple keywords, this phase reads the lightweight `.txt` files and asks Gemini to intelligently classify the document's context (e.g., `Medical`, `Legal_Pleadings`, `Corporate`, `Financial`).
+* **Cost Efficiency:** By only sending the first 10,000 characters of the extracted `.txt` file instead of re-uploading massive PDFs, this phase categorizes thousands of documents for fractions of a cent. It moves both the `.txt` and the sibling media file into specific Knowledge Base subfolders.
 
-## 🤖 Phase 3: Virtual Agents & Sandboxing
-To prevent the AI from cross-contaminating the facts of different matters, the system utilizes custom "Workspace Models" within Open WebUI.
+### Phase 2B: Offline Medical Sieve (100% Local)
+* **Fast Keyword Sieve:** An entirely offline process that scans the `.txt` files for specific family names, conditions (e.g., "synovial cyst"), and medical terminology. 
+* **Privacy First:** Instantly segregates highly sensitive medical records into a quarantined folder without ever connecting to the internet.
 
-* **The Base Engine:** All agents run off the same core 12B Gemma 3 model to optimize disk space on the external SSD.
-* **The Ironclad System Prompt:** Each agent is locked into its sandbox via a strict system prompt isolating it to a specific litigation matter.
-* **Fact Injection:** The specific RAG folder (Knowledge Base) containing only the documents for that specific case is attached directly to the agent.
+### Phase 3: Cryptographic Deduplication (100% Local)
+* **SHA-256 Hashing:** Uses local mathematical algorithms to read the exact binary fingerprint of every file in the directory. 
+* **RAG Hygiene:** If it finds an exact byte-for-byte duplicate (even if the filenames are completely different), it quarantines the duplicate media file *and* its sibling `.txt` file into a `Duplicates_Bin` to prevent poisoning the downstream RAG vector database. 
 
-## 🔄 Development Philosophy: Cloud Prototyping to Edge Deployment
-To accelerate development, new drafting workflows and complex system prompts are first tested using a hybrid approach.
+---
 
-* **Phase 1 (Cloud):** Use Google AI Studio's massive infrastructure to prove the concept works and refine the extraction prompts. 
-* **Phase 2 (Edge):** Once the prototype is flawless, the pipeline is ported down to the local, air-gapped system (VS Code + GitHub Copilot) for final execution on highly confidential matters.
+## ⚙️ Technical Architecture & Features
+
+* **Multi-Threaded Swarm:** Utilizes Python's `concurrent.futures.ThreadPoolExecutor` strictly capped at 8 concurrent bots to maximize processing speed while respecting Google API rate limits.
+* **Thread-Safe Locks:** Implements `threading.Lock()` to prevent file-move collisions and CSV write-crashes when multiple bots access the same directories simultaneously.
+* **Ghost Correction Regex:** A built-in sanitization engine that strips conversational AI filler (e.g., *"Here is the extracted text:"*) and stray markdown formatting from the OCR output.
+* **Immutable Ledgering:** Every action (renames, categorizations, and deduplications) is permanently logged to local CSV files (`document_catalog_gemini.csv` and `duplicate_log.csv`) for forensic auditing.
+
+## 🛠 Usage
+1. Ensure your Google API Key is pasted into the GUI (it will securely save to `~/.legal_sorter_api_key.txt`).
+2. Select your Master Source folder.
+3. Select your Target folder (or select the same folder for in-place deduplication/routing).
+4. Select the desired Pipeline Phase and click **Run Swarm Engine**.

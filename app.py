@@ -7,6 +7,7 @@ import shutil
 import tempfile
 import threading
 import concurrent.futures
+import hashlib
 import tkinter as tk
 from tkinter import filedialog
 import customtkinter as ctk
@@ -31,28 +32,29 @@ class LegalSorterApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("AI Legal Document Sorter (Multi-Threaded)")
-        self.geometry("750x780")
+        self.title("AI Legal Document Sorter & Deduplicator")
+        self.geometry("750x820")
         
         self.source_dir = ""
         self.target_dir = ""
         self.csv_lock = threading.Lock()
+        self.move_lock = threading.Lock() # Prevents bots from crashing when moving files simultaneously
         
         # --- UI LAYOUT ---
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(5, weight=1)
+        self.grid_rowconfigure(6, weight=1)
 
         # 1. Folder Selection Frame
         self.frame_top = ctk.CTkFrame(self)
         self.frame_top.grid(row=0, column=0, padx=20, pady=20, sticky="ew")
         self.frame_top.grid_columnconfigure(1, weight=1)
 
-        self.btn_source = ctk.CTkButton(self.frame_top, text="Select Master Source Folder", command=self.select_source)
+        self.btn_source = ctk.CTkButton(self.frame_top, text="Select Source Folder", command=self.select_source)
         self.btn_source.grid(row=0, column=0, padx=10, pady=10)
         self.lbl_source = ctk.CTkLabel(self.frame_top, text="No folder selected", text_color="gray")
         self.lbl_source.grid(row=0, column=1, sticky="w")
 
-        self.btn_target = ctk.CTkButton(self.frame_top, text="Select Target (Clean) Folder", command=self.select_target)
+        self.btn_target = ctk.CTkButton(self.frame_top, text="Select Target Folder", command=self.select_target)
         self.btn_target.grid(row=1, column=0, padx=10, pady=10)
         self.lbl_target = ctk.CTkLabel(self.frame_top, text="No folder selected", text_color="gray")
         self.lbl_target.grid(row=1, column=1, sticky="w")
@@ -73,10 +75,24 @@ class LegalSorterApp(ctk.CTk):
 
         self.load_api_key()
 
-        # 3. Scan Mode Frame (Deep vs Shallow)
+        # 3. Pipeline Task Selection (THE ROUTER)
+        self.task_var = tk.StringVar(value="ocr")
+        self.frame_task = ctk.CTkFrame(self)
+        self.frame_task.grid(row=2, column=0, padx=20, pady=(0, 10), sticky="ew")
+        
+        self.lbl_task = ctk.CTkLabel(self.frame_task, text="⚙️ Select Pipeline Task:", font=ctk.CTkFont(weight="bold"))
+        self.lbl_task.grid(row=0, column=0, padx=10, pady=5, sticky="w")
+        
+        self.radio_ocr = ctk.CTkRadioButton(self.frame_task, text="Phase 1: AI OCR & Rename (Requires API Key)", variable=self.task_var, value="ocr")
+        self.radio_ocr.grid(row=1, column=0, padx=20, pady=5, sticky="w")
+        
+        self.radio_dupe = ctk.CTkRadioButton(self.frame_task, text="Phase 2: Offline Deduplication (Isolates exact copies & sibling .txt files)", variable=self.task_var, value="dupe")
+        self.radio_dupe.grid(row=2, column=0, padx=20, pady=5, sticky="w")
+
+        # 4. Scan Mode Frame (Deep vs Shallow)
         self.scan_mode_var = tk.BooleanVar(value=True) # Defaulting to Deep Scan
         self.frame_scan = ctk.CTkFrame(self)
-        self.frame_scan.grid(row=2, column=0, padx=20, pady=(0, 10), sticky="ew")
+        self.frame_scan.grid(row=3, column=0, padx=20, pady=(0, 10), sticky="ew")
         
         self.lbl_scan = ctk.CTkLabel(self.frame_scan, text="🗂️ Folder Scan Depth:", font=ctk.CTkFont(weight="bold"))
         self.lbl_scan.grid(row=0, column=0, padx=10, pady=10, sticky="w")
@@ -87,16 +103,16 @@ class LegalSorterApp(ctk.CTk):
         self.radio_shallow = ctk.CTkRadioButton(self.frame_scan, text="Shallow Scan (This folder only)", variable=self.scan_mode_var, value=False)
         self.radio_shallow.grid(row=0, column=2, padx=10, pady=10, sticky="w")
 
-        # 4. Action Button & Telemetry Readout
+        # 5. Action Button & Telemetry Readout
         self.btn_run = ctk.CTkButton(self, text=f"▶ Run Swarm Engine ({MAX_CONCURRENT_WORKERS} Bots)", font=ctk.CTkFont(size=15, weight="bold"), height=40, command=self.start_processing_thread)
-        self.btn_run.grid(row=3, column=0, padx=20, pady=(10, 5), sticky="ew")
+        self.btn_run.grid(row=4, column=0, padx=20, pady=(10, 5), sticky="ew")
 
         self.lbl_progress = ctk.CTkLabel(self, text="Awaiting Task...", font=ctk.CTkFont(size=14, weight="bold"), text_color="#2FA572")
-        self.lbl_progress.grid(row=4, column=0, pady=(0, 10))
+        self.lbl_progress.grid(row=5, column=0, pady=(0, 10))
 
-        # 5. Live Console Readout
+        # 6. Live Console Readout
         self.console = ctk.CTkTextbox(self, font=ctk.CTkFont(family="Courier", size=12))
-        self.console.grid(row=5, column=0, padx=20, pady=(0, 20), sticky="nsew")
+        self.console.grid(row=6, column=0, padx=20, pady=(0, 20), sticky="nsew")
         self.log_message("System Ready. Please select folders to begin.\n")
 
     # --- GUI LOGIC ---
@@ -105,7 +121,7 @@ class LegalSorterApp(ctk.CTk):
         if key:
             with open(CONFIG_FILE, "w") as f:
                 f.write(key)
-            self.log_message("[SYSTEM] API Key securely saved to your Mac profile.")
+            self.log_message("[SYSTEM] API Key securely saved.")
         else:
             self.log_message("[WARNING] API Key field is empty.")
 
@@ -117,7 +133,7 @@ class LegalSorterApp(ctk.CTk):
                     self.entry_api.insert(0, key)
 
     def select_source(self):
-        self.source_dir = filedialog.askdirectory(title="Select Master Source Folder")
+        self.source_dir = filedialog.askdirectory(title="Select Source Folder")
         if self.source_dir:
             self.lbl_source.configure(text=os.path.basename(self.source_dir), text_color="white")
 
@@ -159,16 +175,21 @@ class LegalSorterApp(ctk.CTk):
             flags=re.IGNORECASE,
         )
 
-        # Remove known injected URL artifact and markdown fences.
         sanitized = re.sub(r"https?://googleusercontent\.com/immersive_entry_chip/\d+%?", "", sanitized)
-        sanitized = re.sub(r"^```(?:json|text)?\s*|\s*```$", "", sanitized, flags=re.MULTILINE)
+        
+        # Safe backtick generation to prevent IDE/Markdown copy-paste truncation
+        ticks = chr(96) * 3
+        pattern = r"^" + ticks + r"(?:json|text|markdown)?\s*|\s*" + ticks + r"$"
+        sanitized = re.sub(pattern, "", sanitized, flags=re.MULTILINE)
+        
         return sanitized.strip()
 
-    # --- THE WORKER BOT (Processes a single file) ---
-    def process_single_file(self, old_path, catalog_file, client):
-        filename = os.path.basename(old_path)
-        ext = os.path.splitext(filename)[1].lower()
-        self.log_message(f"Bot engaged: {filename}...")
+    # --- BOT TASK 1: THE OCR WORKER (Original Baseline) ---
+    def bot_ocr_rename(self, filepath_str, catalog_file, client, _file_hashes, _dupe_dir, _dupe_log_path):
+        old_path = Path(filepath_str)
+        filename = old_path.name
+        ext = old_path.suffix.lower()
+        self.log_message(f"[OCR Bot] Engaged: {filename}...")
 
         temp_dir = tempfile.gettempdir()
         safe_filename = f"safe_upload_{int(time.time() * 1000)}_{threading.get_ident()}"
@@ -177,7 +198,7 @@ class LegalSorterApp(ctk.CTk):
         if ext in ['.tiff', '.tif', '.heic']:
             upload_path = os.path.join(temp_dir, safe_filename + ".pdf")
             try:
-                img = Image.open(old_path)
+                img = Image.open(str(old_path))
                 imgs = [img.convert("RGB")]
                 if getattr(img, "is_animated", False) or hasattr(img, "n_frames"):
                     for i in range(1, img.n_frames):
@@ -189,14 +210,13 @@ class LegalSorterApp(ctk.CTk):
                 return
         else:
             upload_path = os.path.join(temp_dir, safe_filename + ext)
-            shutil.copy2(old_path, upload_path)
+            shutil.copy2(str(old_path), upload_path)
 
         uploaded_file = None
         try:
             uploaded_file = client.files.upload(file=upload_path)
 
             while uploaded_file.state.name == 'PROCESSING':
-                self.log_message(f"   [WAIT] Google is digesting {filename}...")
                 time.sleep(3)
                 uploaded_file = client.files.get(name=uploaded_file.name)
 
@@ -217,22 +237,24 @@ class LegalSorterApp(ctk.CTk):
 
                 year_match = re.match(r'^(\d{4})', c_date)
                 year_folder = year_match.group(1) if year_match else "Unknown_Year"
-                year_dir_path = os.path.join(self.target_dir, year_folder)
-                os.makedirs(year_dir_path, exist_ok=True)
+                
+                with self.move_lock:
+                    year_dir_path = Path(self.target_dir) / year_folder
+                    year_dir_path.mkdir(parents=True, exist_ok=True)
 
-                new_filename = f"{c_date}_{d_type}{ext}"
-                new_path = os.path.join(year_dir_path, new_filename)
-                if os.path.exists(new_path):
-                    new_filename = f"{c_date}_{d_type}_2_{int(time.time() % 1000)}{ext}"
-                    new_path = os.path.join(year_dir_path, new_filename)
+                    new_filename = f"{c_date}_{d_type}{ext}"
+                    new_path = year_dir_path / new_filename
+                    if new_path.exists():
+                        new_filename = f"{c_date}_{d_type}_2_{int(time.time() % 1000)}{ext}"
+                        new_path = year_dir_path / new_filename
 
-                txt_path = os.path.join(year_dir_path, f"{os.path.splitext(new_filename)[0]}.txt")
+                    txt_path = year_dir_path / f"{new_path.stem}.txt"
 
-                shutil.move(old_path, new_path)
-                extracted_text = self.apply_ghost_correction_regex(res_text.text) if res_text.text else ""
-                if extracted_text:
-                    with open(txt_path, 'w', encoding='utf-8') as f:
-                        f.write(extracted_text)
+                    shutil.move(str(old_path), str(new_path))
+                    extracted_text = self.apply_ghost_correction_regex(res_text.text) if res_text.text else ""
+                    if extracted_text:
+                        with open(txt_path, 'w', encoding='utf-8') as f:
+                            f.write(extracted_text)
 
                 with self.csv_lock:
                     with open(catalog_file, 'a', newline='') as f:
@@ -242,7 +264,7 @@ class LegalSorterApp(ctk.CTk):
                             new_filename,
                             c_date,
                             d_type,
-                            old_path,
+                            str(old_path),
                         ])
 
                 self.log_message(f"✓ Saved: /{year_folder}/{new_filename}")
@@ -262,47 +284,87 @@ class LegalSorterApp(ctk.CTk):
 
         time.sleep(2)
 
-    # --- THE SWARM MANAGER ---
-    def run_pipeline_manager(self):
-        api_key = self.entry_api.get().strip()
-        if not api_key:
-            self.log_message("[CRITICAL] Please enter your GEMINI_API_KEY in the box above.")
-            self.after(0, lambda: self.btn_run.configure(state="normal", text=f"▶ Run Swarm Engine ({MAX_CONCURRENT_WORKERS} Bots)"))
-            self.after(0, lambda: self.lbl_progress.configure(text="Awaiting Task..."))
+    # --- BOT TASK 2: OFFLINE DEDUPLICATION ---
+    def bot_find_duplicates(self, filepath_str, _catalog_file, _client, file_hashes, dupe_dir, dupe_log_path):
+        file_path = Path(filepath_str)
+        
+        # 1. Verification
+        if not file_path.exists() or file_path.stat().st_size == 0 or file_path.name == '.DS_Store':
             return
 
-        client = genai.Client(api_key=api_key)
+        try:
+            # 2. Generate SHA-256 Mathematical Fingerprint
+            hasher = hashlib.sha256()
+            with open(file_path, 'rb') as f:
+                while chunk := f.read(8192):
+                    hasher.update(chunk)
+            file_fingerprint = hasher.hexdigest()
 
-        catalog_file = os.path.join(self.target_dir, "document_catalog_gemini.csv")
-        if not os.path.exists(catalog_file):
-            with open(catalog_file, 'w', newline='') as f:
-                csv.writer(f).writerow([
-                    "Process_Timestamp",
-                    "Original_Filename",
-                    "New_Filename",
-                    "Execution_Date",
-                    "Document_Type",
-                    "Original_Path",
-                ])
+            # 3. Check fingerprint against the shared swarm memory
+            with self.move_lock: 
+                if file_fingerprint in file_hashes:
+                    original_file = file_hashes[file_fingerprint]
+                    
+                    # 4. Move the primary media file
+                    dest_path = dupe_dir / file_path.name
+                    if dest_path.exists():
+                        dest_path = dupe_dir / f"{file_path.stem}_{int(time.time() % 1000)}{file_path.suffix}"
+                    
+                    shutil.move(str(file_path), str(dest_path))
+                    self.log_message(f"🗑️ DUPLICATE MOVED: {file_path.name}")
+                    
+                    # 5. Check for and move the sibling .txt file (RAG hygiene)
+                    sibling_txt = file_path.with_suffix('.txt')
+                    if sibling_txt.exists() and file_path.suffix.lower() != '.txt':
+                        dest_txt_path = dupe_dir / f"{dest_path.stem}.txt"
+                        shutil.move(str(sibling_txt), str(dest_txt_path))
+                        self.log_message(f"   -> Moved sibling TXT: {sibling_txt.name}")
 
-        self.log_message("Scanning master folder tree. Building target list...")
+                    # 6. Log the duplicate
+                    with open(dupe_log_path, 'a', newline='', encoding='utf-8') as f:
+                        csv.writer(f).writerow([
+                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
+                            str(file_path), 
+                            str(original_file), 
+                            str(dest_path)
+                        ])
+                else:
+                    # Mark fingerprint as seen
+                    file_hashes[file_fingerprint] = str(file_path)
+                    
+        except Exception as e:
+            self.log_message(f"   [ERROR] Deduplication failed on {file_path.name}: {e}")
 
+    # --- THE SWARM MANAGER ---
+    def run_pipeline_manager(self):
+        task = self.task_var.get()
+        api_key = self.entry_api.get().strip()
+        client = None
+        
+        # 1. API Verification
+        if task == "ocr":
+            if not api_key:
+                self.log_message("[CRITICAL] Please enter your GEMINI_API_KEY in the box above.")
+                self.after(0, lambda: self.btn_run.configure(state="normal", text=f"▶ Run Swarm Engine ({MAX_CONCURRENT_WORKERS} Bots)"))
+                self.after(0, lambda: self.lbl_progress.configure(text="Awaiting Task..."))
+                return
+            client = genai.Client(api_key=api_key)
+
+        self.log_message(f"Scanning master folder tree for task: {task}...")
+
+        # 2. File Targeting
+        is_deep_scan = self.scan_mode_var.get()
+        source_path = Path(self.source_dir)
+        
+        # We calculate hashes on PDFs/Images. TXT files are handled as siblings.
+        allowed_exts = {ext.lower() for ext in SUPPORTED_EXTS}
+        crawler = source_path.rglob('*') if is_deep_scan else source_path.iterdir()
+        
         files_to_process = []
-        deep_scan = self.scan_mode_var.get()
-        if deep_scan:
-            for root, _, files in os.walk(self.source_dir):
-                for f in files:
-                    ext = os.path.splitext(f)[1].lower()
-                    if ext in SUPPORTED_EXTS and not f.startswith('._'):
-                        files_to_process.append(os.path.join(root, f))
-        else:
-            for f in os.listdir(self.source_dir):
-                file_path = os.path.join(self.source_dir, f)
-                if not os.path.isfile(file_path):
-                    continue
-                ext = os.path.splitext(f)[1].lower()
-                if ext in SUPPORTED_EXTS and not f.startswith('._'):
-                    files_to_process.append(file_path)
+        for item in crawler:
+            if item.is_file() and not item.name.startswith('._') and item.stat().st_size > 0:
+                if item.suffix.lower() in allowed_exts:
+                    files_to_process.append(str(item.resolve()))
 
         total_files = len(files_to_process)
         if total_files == 0:
@@ -311,13 +373,34 @@ class LegalSorterApp(ctk.CTk):
             self.after(0, lambda: self.lbl_progress.configure(text="Complete"))
             return
 
-        self.log_message(f"Deploying {MAX_CONCURRENT_WORKERS} bots to process {total_files} files...\n---")
+        # 3. Setup Task Dependencies
+        catalog_file = ""
+        file_hashes = {} 
+        dupe_dir = Path(self.target_dir) / "Duplicates_Bin"
+        dupe_log_path = Path(self.target_dir) / "duplicate_log.csv"
 
+        if task == "ocr":
+            catalog_file = os.path.join(self.target_dir, "document_catalog_gemini.csv")
+            if not os.path.exists(catalog_file):
+                with open(catalog_file, 'w', newline='') as f:
+                    csv.writer(f).writerow(["Process_Timestamp", "Original_Filename", "New_Filename", "Execution_Date", "Document_Type", "Original_Path"])
+        elif task == "dupe":
+            with self.move_lock:
+                dupe_dir.mkdir(parents=True, exist_ok=True)
+                if not dupe_log_path.exists():
+                    with open(dupe_log_path, 'w', newline='', encoding='utf-8') as f:
+                        csv.writer(f).writerow(["Timestamp", "Original_Path", "Matched_With_Original", "Moved_To"])
+
+        # 4. Route to the correct Bot Function
+        worker_func = self.bot_ocr_rename if task == "ocr" else self.bot_find_duplicates
+
+        self.log_message(f"Deploying {MAX_CONCURRENT_WORKERS} bots to process {total_files} files...\n---")
         start_time = time.time()
         processed_count = 0
 
+        # 5. Deploy the Swarm
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT_WORKERS) as executor:
-            futures = [executor.submit(self.process_single_file, filepath, catalog_file, client) for filepath in files_to_process]
+            futures = [executor.submit(worker_func, filepath, catalog_file, client, file_hashes, dupe_dir, dupe_log_path) for filepath in files_to_process]
 
             for future in concurrent.futures.as_completed(futures):
                 processed_count += 1
